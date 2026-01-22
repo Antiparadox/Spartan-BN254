@@ -3,9 +3,10 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::commitments::{Commitments, MultiCommitGens};
 use crate::errors::ProofVerifyError;
-use crate::group::{CompressedGroup, GroupElement};
+use crate::group::GroupElement;
 use crate::random::RandomTape;
 use crate::scalar::Scalar;
 use crate::transcript::{AppendToTranscript, ProofTranscript};
@@ -16,9 +17,11 @@ mod bullet;
 pub use bullet::BulletReductionProof;
 
 /// Knowledge proof: proves knowledge of (x, r) such that C = g^x * h^r
-#[derive(Serialize, Deserialize, Debug)]
+/// 
+/// Uses GroupElement (G1Projective) for cross-verification compatibility with arkworks-spartan
+#[derive(Serialize, Deserialize, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct KnowledgeProof {
-    alpha: CompressedGroup,
+    alpha: GroupElement,
     z1: Scalar,
     z2: Scalar,
 }
@@ -34,17 +37,17 @@ impl KnowledgeProof {
         random_tape: &mut RandomTape,
         x: &Scalar,
         r: &Scalar,
-    ) -> (KnowledgeProof, CompressedGroup) {
+    ) -> (KnowledgeProof, GroupElement) {
         transcript.append_protocol_name(KnowledgeProof::protocol_name());
 
         // produce two random Scalars
         let t1 = random_tape.random_scalar(b"t1");
         let t2 = random_tape.random_scalar(b"t2");
 
-        let C = x.commit(r, gens_n).compress();
+        let C = x.commit(r, gens_n);
         C.append_to_transcript(b"C", transcript);
 
-        let alpha = t1.commit(&t2, gens_n).compress();
+        let alpha = t1.commit(&t2, gens_n);
         alpha.append_to_transcript(b"alpha", transcript);
 
         let c = transcript.challenge_scalar(b"c");
@@ -59,7 +62,7 @@ impl KnowledgeProof {
         &self,
         gens_n: &MultiCommitGens,
         transcript: &mut Transcript,
-        C: &CompressedGroup,
+        C: &GroupElement,
     ) -> Result<(), ProofVerifyError> {
         transcript.append_protocol_name(KnowledgeProof::protocol_name());
         C.append_to_transcript(b"C", transcript);
@@ -67,10 +70,8 @@ impl KnowledgeProof {
 
         let c = transcript.challenge_scalar(b"c");
 
-        let lhs = self.z1.commit(&self.z2, gens_n).compress();
-        let C_decompressed = C.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let alpha_decompressed = self.alpha.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let rhs = (c * C_decompressed + alpha_decompressed).compress();
+        let lhs = self.z1.commit(&self.z2, gens_n);
+        let rhs = c * *C + self.alpha;
 
         if lhs == rhs {
             Ok(())
@@ -81,9 +82,9 @@ impl KnowledgeProof {
 }
 
 /// Equality proof: proves C1 and C2 commit to the same value
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct EqualityProof {
-    alpha: CompressedGroup,
+    alpha: GroupElement,
     z: Scalar,
 }
 
@@ -100,19 +101,19 @@ impl EqualityProof {
         s1: &Scalar,
         v2: &Scalar,
         s2: &Scalar,
-    ) -> (EqualityProof, CompressedGroup, CompressedGroup) {
+    ) -> (EqualityProof, GroupElement, GroupElement) {
         transcript.append_protocol_name(EqualityProof::protocol_name());
 
         // produce a random Scalar
         let r = random_tape.random_scalar(b"r");
 
-        let C1 = v1.commit(s1, gens_n).compress();
+        let C1 = v1.commit(s1, gens_n);
         C1.append_to_transcript(b"C1", transcript);
 
-        let C2 = v2.commit(s2, gens_n).compress();
+        let C2 = v2.commit(s2, gens_n);
         C2.append_to_transcript(b"C2", transcript);
 
-        let alpha = (r * gens_n.h).compress();
+        let alpha = r * gens_n.h;
         alpha.append_to_transcript(b"alpha", transcript);
 
         let c = transcript.challenge_scalar(b"c");
@@ -126,8 +127,8 @@ impl EqualityProof {
         &self,
         gens_n: &MultiCommitGens,
         transcript: &mut Transcript,
-        C1: &CompressedGroup,
-        C2: &CompressedGroup,
+        C1: &GroupElement,
+        C2: &GroupElement,
     ) -> Result<(), ProofVerifyError> {
         transcript.append_protocol_name(EqualityProof::protocol_name());
         C1.append_to_transcript(b"C1", transcript);
@@ -135,13 +136,10 @@ impl EqualityProof {
         self.alpha.append_to_transcript(b"alpha", transcript);
 
         let c = transcript.challenge_scalar(b"c");
-        let C1_decompressed = C1.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let C2_decompressed = C2.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let alpha_decompressed = self.alpha.decompress().ok_or(ProofVerifyError::InternalError)?;
         
-        let C = C1_decompressed + (Scalar::zero() - Scalar::one()) * C2_decompressed;
-        let rhs = (c * C + alpha_decompressed).compress();
-        let lhs = (self.z * gens_n.h).compress();
+        let C = *C1 + (Scalar::zero() - Scalar::one()) * *C2;
+        let rhs = c * C + self.alpha;
+        let lhs = self.z * gens_n.h;
 
         if lhs == rhs {
             Ok(())
@@ -152,11 +150,11 @@ impl EqualityProof {
 }
 
 /// Product proof: proves Z = X * Y for committed values
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ProductProof {
-    alpha: CompressedGroup,
-    beta: CompressedGroup,
-    delta: CompressedGroup,
+    alpha: GroupElement,
+    beta: GroupElement,
+    delta: GroupElement,
     z: [Scalar; 5],
 }
 
@@ -176,7 +174,7 @@ impl ProductProof {
         rY: &Scalar,
         z: &Scalar,
         rZ: &Scalar,
-    ) -> (ProductProof, CompressedGroup, CompressedGroup, CompressedGroup) {
+    ) -> (ProductProof, GroupElement, GroupElement, GroupElement) {
         transcript.append_protocol_name(ProductProof::protocol_name());
 
         // produce five random Scalar
@@ -186,28 +184,24 @@ impl ProductProof {
         let b4 = random_tape.random_scalar(b"b4");
         let b5 = random_tape.random_scalar(b"b5");
 
-        let X = x.commit(rX, gens_n).compress();
+        let X = x.commit(rX, gens_n);
         X.append_to_transcript(b"X", transcript);
 
-        let Y = y.commit(rY, gens_n).compress();
+        let Y = y.commit(rY, gens_n);
         Y.append_to_transcript(b"Y", transcript);
 
-        let Z = z.commit(rZ, gens_n).compress();
+        let Z = z.commit(rZ, gens_n);
         Z.append_to_transcript(b"Z", transcript);
 
-        let alpha = b1.commit(&b2, gens_n).compress();
+        let alpha = b1.commit(&b2, gens_n);
         alpha.append_to_transcript(b"alpha", transcript);
 
-        let beta = b3.commit(&b4, gens_n).compress();
+        let beta = b3.commit(&b4, gens_n);
         beta.append_to_transcript(b"beta", transcript);
 
         let delta = {
-            let gens_X = MultiCommitGens {
-                n: 1,
-                G: vec![X.decompress().unwrap()],
-                h: gens_n.h,
-            };
-            b3.commit(&b5, &gens_X).compress()
+            let gens_X = MultiCommitGens::from_generators(vec![X], gens_n.h);
+            b3.commit(&b5, &gens_X)
         };
         delta.append_to_transcript(b"delta", transcript);
 
@@ -233,24 +227,15 @@ impl ProductProof {
     }
 
     fn check_equality(
-        P: &CompressedGroup,
-        X: &CompressedGroup,
+        P: &GroupElement,
+        X: &GroupElement,
         c: &Scalar,
         gens_n: &MultiCommitGens,
         z1: &Scalar,
         z2: &Scalar,
     ) -> bool {
-        let P_decomp = match P.decompress() {
-            Some(p) => p,
-            None => return false,
-        };
-        let X_decomp = match X.decompress() {
-            Some(x) => x,
-            None => return false,
-        };
-        
-        let lhs = (P_decomp + *c * X_decomp).compress();
-        let rhs = z1.commit(z2, gens_n).compress();
+        let lhs = *P + *c * *X;
+        let rhs = z1.commit(z2, gens_n);
         lhs == rhs
     }
 
@@ -259,9 +244,9 @@ impl ProductProof {
         &self,
         gens_n: &MultiCommitGens,
         transcript: &mut Transcript,
-        X: &CompressedGroup,
-        Y: &CompressedGroup,
-        Z: &CompressedGroup,
+        X: &GroupElement,
+        Y: &GroupElement,
+        Z: &GroupElement,
     ) -> Result<(), ProofVerifyError> {
         transcript.append_protocol_name(ProductProof::protocol_name());
 
@@ -280,19 +265,13 @@ impl ProductProof {
 
         let c = transcript.challenge_scalar(b"c");
 
-        let X_decomp = X.decompress().ok_or(ProofVerifyError::InternalError)?;
-
         if ProductProof::check_equality(&self.alpha, X, &c, gens_n, &z1, &z2)
             && ProductProof::check_equality(&self.beta, Y, &c, gens_n, &z3, &z4)
             && ProductProof::check_equality(
                 &self.delta,
                 Z,
                 &c,
-                &MultiCommitGens {
-                    n: 1,
-                    G: vec![X_decomp],
-                    h: gens_n.h,
-                },
+                &MultiCommitGens::from_generators(vec![*X], gens_n.h),
                 &z3,
                 &z5,
             )
@@ -305,10 +284,10 @@ impl ProductProof {
 }
 
 /// Dot product proof
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DotProductProof {
-    delta: CompressedGroup,
-    beta: CompressedGroup,
+    delta: GroupElement,
+    beta: GroupElement,
     z: Vec<Scalar>,
     z_delta: Scalar,
     z_beta: Scalar,
@@ -335,7 +314,7 @@ impl DotProductProof {
         a_vec: &[Scalar],
         y: &Scalar,
         blind_y: &Scalar,
-    ) -> (DotProductProof, CompressedGroup, CompressedGroup) {
+    ) -> (DotProductProof, GroupElement, GroupElement) {
         transcript.append_protocol_name(DotProductProof::protocol_name());
 
         let n = x_vec.len();
@@ -348,20 +327,20 @@ impl DotProductProof {
         let r_delta = random_tape.random_scalar(b"r_delta");
         let r_beta = random_tape.random_scalar(b"r_beta");
 
-        let Cx = x_vec.commit(blind_x, gens_n).compress();
+        let Cx = x_vec.commit(blind_x, gens_n);
         Cx.append_to_transcript(b"Cx", transcript);
 
-        let Cy = y.commit(blind_y, gens_1).compress();
+        let Cy = y.commit(blind_y, gens_1);
         Cy.append_to_transcript(b"Cy", transcript);
 
         a_vec.append_to_transcript(b"a", transcript);
 
-        let delta = d_vec.commit(&r_delta, gens_n).compress();
+        let delta = d_vec.commit(&r_delta, gens_n);
         delta.append_to_transcript(b"delta", transcript);
 
         let dotproduct_a_d = DotProductProof::compute_dotproduct(a_vec, &d_vec);
 
-        let beta = dotproduct_a_d.commit(&r_beta, gens_1).compress();
+        let beta = dotproduct_a_d.commit(&r_beta, gens_1);
         beta.append_to_transcript(b"beta", transcript);
 
         let c = transcript.challenge_scalar(b"c");
@@ -393,8 +372,8 @@ impl DotProductProof {
         gens_n: &MultiCommitGens,
         transcript: &mut Transcript,
         a: &[Scalar],
-        Cx: &CompressedGroup,
-        Cy: &CompressedGroup,
+        Cx: &GroupElement,
+        Cy: &GroupElement,
     ) -> Result<(), ProofVerifyError> {
         assert_eq!(gens_n.n, a.len());
         assert_eq!(gens_1.n, 1);
@@ -408,14 +387,10 @@ impl DotProductProof {
 
         let c = transcript.challenge_scalar(b"c");
 
-        let Cx_decomp = Cx.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let delta_decomp = self.delta.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let mut result = c * Cx_decomp + delta_decomp == self.z.commit(&self.z_delta, gens_n);
+        let mut result = c * *Cx + self.delta == self.z.commit(&self.z_delta, gens_n);
 
         let dotproduct_z_a = DotProductProof::compute_dotproduct(&self.z, a);
-        let Cy_decomp = Cy.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let beta_decomp = self.beta.decompress().ok_or(ProofVerifyError::InternalError)?;
-        result &= c * Cy_decomp + beta_decomp == dotproduct_z_a.commit(&self.z_beta, gens_1);
+        result &= c * *Cy + self.beta == dotproduct_z_a.commit(&self.z_beta, gens_1);
 
         if result {
             Ok(())
@@ -441,11 +416,11 @@ impl DotProductProofGens {
 }
 
 /// Logarithmic-size dot product proof using bullet reduction
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DotProductProofLog {
     bullet_reduction_proof: BulletReductionProof,
-    delta: CompressedGroup,
-    beta: CompressedGroup,
+    delta: GroupElement,
+    beta: GroupElement,
     z1: Scalar,
     z2: Scalar,
 }
@@ -470,7 +445,7 @@ impl DotProductProofLog {
         a_vec: &[Scalar],
         y: &Scalar,
         blind_y: &Scalar,
-    ) -> (DotProductProofLog, CompressedGroup, CompressedGroup) {
+    ) -> (DotProductProofLog, GroupElement, GroupElement) {
         use crate::math::Math;
 
         transcript.append_protocol_name(DotProductProofLog::protocol_name());
@@ -492,10 +467,10 @@ impl DotProductProofLog {
                 .collect::<Vec<(Scalar, Scalar)>>()
         };
 
-        let Cx = x_vec.commit(blind_x, &gens.gens_n).compress();
+        let Cx = x_vec.commit(blind_x, &gens.gens_n);
         Cx.append_to_transcript(b"Cx", transcript);
 
-        let Cy = y.commit(blind_y, &gens.gens_1).compress();
+        let Cy = y.commit(blind_y, &gens.gens_1);
         Cy.append_to_transcript(b"Cy", transcript);
 
         a_vec.append_to_transcript(b"a", transcript);
@@ -520,16 +495,12 @@ impl DotProductProofLog {
         let y_hat = x_hat * a_hat;
 
         let delta = {
-            let gens_hat = MultiCommitGens {
-                n: 1,
-                G: vec![g_hat],
-                h: gens.gens_1.h,
-            };
-            d.commit(&r_delta, &gens_hat).compress()
+            let gens_hat = MultiCommitGens::from_generators(vec![g_hat], gens.gens_1.h);
+            d.commit(&r_delta, &gens_hat)
         };
         delta.append_to_transcript(b"delta", transcript);
 
-        let beta = d.commit(&r_beta, &gens_1_scaled).compress();
+        let beta = d.commit(&r_beta, &gens_1_scaled);
         beta.append_to_transcript(b"beta", transcript);
 
         let c = transcript.challenge_scalar(b"c");
@@ -557,8 +528,8 @@ impl DotProductProofLog {
         gens: &DotProductProofGens,
         transcript: &mut Transcript,
         a: &[Scalar],
-        Cx: &CompressedGroup,
-        Cy: &CompressedGroup,
+        Cx: &GroupElement,
+        Cy: &GroupElement,
     ) -> Result<(), ProofVerifyError> {
         assert_eq!(gens.n, n);
         assert_eq!(a.len(), n);
@@ -573,9 +544,7 @@ impl DotProductProofLog {
         let r = transcript.challenge_scalar(b"r");
         let gens_1_scaled = gens.gens_1.scale(&r);
 
-        let Cx_decomp = Cx.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let Cy_decomp = Cy.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let Gamma = Cx_decomp + r * Cy_decomp;
+        let Gamma = *Cx + r * *Cy;
 
         let (g_hat, Gamma_hat, a_hat) =
             self.bullet_reduction_proof
@@ -586,15 +555,8 @@ impl DotProductProofLog {
 
         let c = transcript.challenge_scalar(b"c");
 
-        let c_s = &c;
-        let beta_s = self.beta.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let a_hat_s = &a_hat;
-        let delta_s = self.delta.decompress().ok_or(ProofVerifyError::InternalError)?;
-        let z1_s = &self.z1;
-        let z2_s = &self.z2;
-
-        let lhs = ((*c_s * Gamma_hat + beta_s) * *a_hat_s + delta_s).compress();
-        let rhs = ((*z1_s * (g_hat + *a_hat_s * gens_1_scaled.G[0])) + *z2_s * gens_1_scaled.h).compress();
+        let lhs = (c * Gamma_hat + self.beta) * a_hat + self.delta;
+        let rhs = self.z1 * (g_hat + a_hat * gens_1_scaled.G[0]) + self.z2 * gens_1_scaled.h;
 
         if lhs == rhs {
             Ok(())

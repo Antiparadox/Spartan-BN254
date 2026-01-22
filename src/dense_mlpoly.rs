@@ -1,8 +1,9 @@
 //! Dense multilinear polynomial representation
 
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::commitments::{Commitments, MultiCommitGens};
 use crate::errors::ProofVerifyError;
-use crate::group::{CompressedGroup, GroupElement};
+use crate::group::GroupElement;
 use crate::math::Math;
 use crate::nizk::{DotProductProofGens, DotProductProofLog};
 use crate::random::RandomTape;
@@ -35,9 +36,9 @@ pub struct PolyCommitmentBlinds {
 }
 
 /// Polynomial commitment
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PolyCommitment {
-    pub C: Vec<CompressedGroup>,
+    pub C: Vec<GroupElement>,
 }
 
 impl AppendToTranscript for PolyCommitment {
@@ -51,7 +52,7 @@ impl AppendToTranscript for PolyCommitment {
 }
 
 /// Polynomial evaluation proof
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PolyEvalProof {
     proof: DotProductProofLog,
 }
@@ -70,7 +71,7 @@ impl PolyEvalProof {
         gens: &PolyCommitmentGens,
         transcript: &mut Transcript,
         random_tape: &mut RandomTape,
-    ) -> (PolyEvalProof, CompressedGroup) {
+    ) -> (PolyEvalProof, GroupElement) {
         transcript.append_protocol_name(PolyEvalProof::protocol_name());
 
         assert_eq!(poly.get_num_vars(), r.len());
@@ -119,7 +120,7 @@ impl PolyEvalProof {
         gens: &PolyCommitmentGens,
         transcript: &mut Transcript,
         r: &[Scalar],
-        C_Zr: &CompressedGroup,
+        C_Zr: &GroupElement,
         comm: &PolyCommitment,
     ) -> Result<(), ProofVerifyError> {
         transcript.append_protocol_name(PolyEvalProof::protocol_name());
@@ -129,9 +130,7 @@ impl PolyEvalProof {
         let (L, R) = eq.compute_factored_evals();
 
         // compute a weighted sum of commitments and L
-        let C_decompressed = comm.C.iter().map(|pt| pt.decompress().unwrap());
-
-        let C_LZ = GroupElement::vartime_multiscalar_mul(&L, C_decompressed).compress();
+        let C_LZ = GroupElement::vartime_multiscalar_mul(&L, &comm.C);
 
         self.proof
             .verify(R.len(), &gens.gens, transcript, &R, &C_LZ, C_Zr)
@@ -146,7 +145,7 @@ impl PolyEvalProof {
         comm: &PolyCommitment,
     ) -> Result<(), ProofVerifyError> {
         // compute a commitment to Zr with a blind of zero
-        let C_Zr = Zr.commit(&Scalar::zero(), &gens.gens.gens_1).compress();
+        let C_Zr = Zr.commit(&Scalar::zero(), &gens.gens.gens_1);
 
         self.verify(gens, transcript, r, &C_Zr, comm)
     }
@@ -257,7 +256,6 @@ impl DensePolynomial {
             .map(|i| {
                 self.Z[R_size * i..R_size * (i + 1)]
                     .commit(&blinds[i], gens)
-                    .compress()
             })
             .collect();
         PolyCommitment { C }
@@ -272,7 +270,6 @@ impl DensePolynomial {
             .map(|i| {
                 self.Z[R_size * i..R_size * (i + 1)]
                     .commit(&blinds[i], gens)
-                    .compress()
             })
             .collect();
         PolyCommitment { C }

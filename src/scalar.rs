@@ -3,13 +3,47 @@
 
 use ark_bn254::Fr;
 use ark_ff::{Field, PrimeField, UniformRand, Zero, One};
-use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize, Compress, Validate, Valid};
 use ark_std::rand::RngCore;
 use std::ops::{Add, Sub, Mul, Neg, AddAssign, SubAssign, MulAssign};
 
 /// Wrapper around ark_bn254::Fr for Spartan compatibility
+/// 
+/// Implements CanonicalSerialize/CanonicalDeserialize for cross-verification compatibility
+/// with arkworks-spartan
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Scalar(pub Fr);
+
+// CanonicalSerialize: delegate to inner Fr
+impl CanonicalSerialize for Scalar {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), ark_serialize::SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl Valid for Scalar {
+    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
+        self.0.check()
+    }
+}
+
+impl CanonicalDeserialize for Scalar {
+    fn deserialize_with_mode<R: std::io::Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        Fr::deserialize_with_mode(reader, compress, validate).map(Scalar)
+    }
+}
 
 impl Scalar {
     /// The zero scalar

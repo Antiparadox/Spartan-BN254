@@ -1,22 +1,99 @@
 //! Group operations for BN254 G1
 //! Port of Spartan's group.rs from Ristretto255 to BN254
+//!
+//! Implements CanonicalSerialize/CanonicalDeserialize for cross-verification
+//! compatibility with arkworks-spartan.
 
 use crate::scalar::Scalar;
 use ark_bn254::{Fr, G1Affine, G1Projective};
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Valid, Validate};
 use core::borrow::Borrow;
 use core::ops::{Add, Mul};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 /// Group element (BN254 G1 projective point)
+/// 
+/// Serializes as G1Projective for arkworks compatibility
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GroupElement(pub G1Projective);
 
 /// Compressed group element (BN254 G1 affine point serialized)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressedGroup(pub Vec<u8>);
+
+// CanonicalSerialize for GroupElement: serialize as G1Projective (matches arkworks-spartan)
+impl CanonicalSerialize for GroupElement {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), ark_serialize::SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl Valid for GroupElement {
+    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
+        self.0.check()
+    }
+}
+
+impl CanonicalDeserialize for GroupElement {
+    fn deserialize_with_mode<R: std::io::Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        G1Projective::deserialize_with_mode(reader, compress, validate).map(GroupElement)
+    }
+}
+
+// CanonicalSerialize for CompressedGroup: serialize as raw bytes (G1Affine compressed)
+impl CanonicalSerialize for CompressedGroup {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        _compress: Compress,
+    ) -> Result<(), ark_serialize::SerializationError> {
+        // Write length prefix then bytes (to match Vec<u8> serialization pattern)
+        writer.write_all(&self.0)?;
+        Ok(())
+    }
+
+    fn serialized_size(&self, _compress: Compress) -> usize {
+        self.0.len()
+    }
+}
+
+impl Valid for CompressedGroup {
+    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
+        // Validate by trying to decompress
+        if self.decompress().is_some() {
+            Ok(())
+        } else {
+            Err(ark_serialize::SerializationError::InvalidData)
+        }
+    }
+}
+
+impl CanonicalDeserialize for CompressedGroup {
+    fn deserialize_with_mode<R: std::io::Read>(
+        mut reader: R,
+        _compress: Compress,
+        _validate: Validate,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        // Read compressed G1Affine (32 bytes for BN254)
+        let mut bytes = vec![0u8; 32];
+        reader.read_exact(&mut bytes)?;
+        Ok(CompressedGroup(bytes))
+    }
+}
 
 impl GroupElement {
     /// Identity element
@@ -77,6 +154,23 @@ impl GroupElement {
             .collect();
 
         let result = G1Projective::msm(&points_vec, &scalars_vec).unwrap_or_default();
+        GroupElement(result)
+    }
+
+    /// Get the underlying projective point
+    pub fn inner(&self) -> &G1Projective {
+        &self.0
+    }
+
+    /// Create from affine point
+    pub fn from_affine(p: G1Affine) -> Self {
+        GroupElement(p.into())
+    }
+
+    /// Variable-time MSM with pre-converted affine points (faster for repeated MSMs)
+    pub fn msm_affine(scalars: &[Scalar], points: &[G1Affine]) -> Self {
+        let scalars_vec: Vec<Fr> = scalars.iter().map(|s| s.0).collect();
+        let result = G1Projective::msm(points, &scalars_vec).unwrap_or_default();
         GroupElement(result)
     }
 }

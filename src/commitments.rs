@@ -1,17 +1,29 @@
 //! Pedersen commitments on BN254 G1
 //! Port of Spartan's commitments.rs
+//! 
+//! Optimization: Stores generators as affine points to avoid repeated conversions during MSM.
 
+use ark_bn254::G1Affine;
+use ark_ec::CurveGroup;
 use crate::group::{group_basepoint_compressed, CompressedGroup, GroupElement};
 use crate::scalar::Scalar;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Shake256, digest::{ExtendableOutput, XofReader}};
 
 /// Generators for multi-scalar commitments
+/// 
+/// Stores generators in AFFINE form for faster MSM (avoids projective->affine conversion each call)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiCommitGens {
     pub n: usize,
+    /// Generators stored as projective points (for compatibility)
     pub G: Vec<GroupElement>,
     pub h: GroupElement,
+    /// Pre-computed affine generators for fast MSM (skips conversion)
+    #[serde(skip)]
+    pub G_affine: Vec<G1Affine>,
+    #[serde(skip)]
+    pub h_affine: G1Affine,
 }
 
 impl MultiCommitGens {
@@ -32,36 +44,73 @@ impl MultiCommitGens {
             gens.push(GroupElement::from_uniform_bytes(&uniform_bytes));
         }
 
+        let G = gens[..n].to_vec();
+        let h = gens[n];
+        
+        // Pre-compute affine points for fast MSM
+        let G_projective: Vec<_> = G.iter().map(|g| *g.inner()).collect();
+        let G_affine = <ark_bn254::G1Projective as CurveGroup>::normalize_batch(&G_projective);
+        let h_affine = h.inner().into_affine();
+
         MultiCommitGens {
             n,
-            G: gens[..n].to_vec(),
-            h: gens[n],
+            G,
+            h,
+            G_affine,
+            h_affine,
         }
     }
 
     pub fn scale(&self, s: &Scalar) -> MultiCommitGens {
+        let G: Vec<GroupElement> = (0..self.n).map(|i| *s * &self.G[i]).collect();
+        let G_projective: Vec<_> = G.iter().map(|g| *g.inner()).collect();
+        let G_affine = <ark_bn254::G1Projective as CurveGroup>::normalize_batch(&G_projective);
+        
         MultiCommitGens {
             n: self.n,
             h: self.h,
-            G: (0..self.n).map(|i| *s * &self.G[i]).collect(),
+            h_affine: self.h_affine,
+            G,
+            G_affine,
         }
     }
 
     pub fn split_at(&self, mid: usize) -> (MultiCommitGens, MultiCommitGens) {
         let (G1, G2) = self.G.split_at(mid);
+        let (G1_affine, G2_affine) = self.G_affine.split_at(mid);
 
         (
             MultiCommitGens {
                 n: G1.len(),
                 G: G1.to_vec(),
                 h: self.h,
+                G_affine: G1_affine.to_vec(),
+                h_affine: self.h_affine,
             },
             MultiCommitGens {
                 n: G2.len(),
                 G: G2.to_vec(),
                 h: self.h,
+                G_affine: G2_affine.to_vec(),
+                h_affine: self.h_affine,
             },
         )
+    }
+
+    /// Create from existing generators (computes affine cache automatically)
+    pub fn from_generators(G: Vec<GroupElement>, h: GroupElement) -> Self {
+        let n = G.len();
+        let G_projective: Vec<_> = G.iter().map(|g| *g.inner()).collect();
+        let G_affine = <ark_bn254::G1Projective as CurveGroup>::normalize_batch(&G_projective);
+        let h_affine = h.inner().into_affine();
+        
+        MultiCommitGens {
+            n,
+            G,
+            h,
+            G_affine,
+            h_affine,
+        }
     }
 }
 
@@ -73,21 +122,34 @@ pub trait Commitments {
 impl Commitments for Scalar {
     fn commit(&self, blind: &Scalar, gens_n: &MultiCommitGens) -> GroupElement {
         assert_eq!(gens_n.n, 1);
-        GroupElement::vartime_multiscalar_mul(&[*self, *blind], &[gens_n.G[0], gens_n.h])
+        // Use affine generators for faster MSM
+        let scalars = [*self, *blind];
+        let points = [gens_n.G_affine[0], gens_n.h_affine];
+        GroupElement::msm_affine(&scalars, &points)
     }
 }
 
 impl Commitments for Vec<Scalar> {
     fn commit(&self, blind: &Scalar, gens_n: &MultiCommitGens) -> GroupElement {
         assert_eq!(gens_n.n, self.len());
-        GroupElement::vartime_multiscalar_mul(self, &gens_n.G) + *blind * gens_n.h
+        // Use affine generators for faster MSM
+        let mut scalars = self.clone();
+        scalars.push(*blind);
+        let mut points = gens_n.G_affine.clone();
+        points.push(gens_n.h_affine);
+        GroupElement::msm_affine(&scalars, &points)
     }
 }
 
 impl Commitments for [Scalar] {
     fn commit(&self, blind: &Scalar, gens_n: &MultiCommitGens) -> GroupElement {
         assert_eq!(gens_n.n, self.len());
-        GroupElement::vartime_multiscalar_mul(self, &gens_n.G) + *blind * gens_n.h
+        // Use affine generators for faster MSM
+        let mut scalars = self.to_vec();
+        scalars.push(*blind);
+        let mut points = gens_n.G_affine.clone();
+        points.push(gens_n.h_affine);
+        GroupElement::msm_affine(&scalars, &points)
     }
 }
 

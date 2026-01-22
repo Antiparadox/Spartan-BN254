@@ -1,16 +1,19 @@
 //! R1CS constraint system for Spartan
 
-use crate::commitments::MultiCommitGens;
-use crate::dense_mlpoly::{DensePolynomial, EqPolynomial, PolyCommitmentGens, PolyEvalProof};
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use crate::dense_mlpoly::DensePolynomial;
 use crate::errors::{ProofVerifyError, R1CSError};
-use crate::group::CompressedGroup;
 use crate::math::Math;
-use crate::product_tree::{DotProductCircuit, ProductCircuit, ProductCircuitEvalProofBatched};
 use crate::random::RandomTape;
 use crate::scalar::Scalar;
 use crate::sparse_mlpoly::{SparseMatEntry, SparseMatPolynomial};
+use crate::sparse_mlpoly_full::{
+    MultiSparseMatPolynomialAsDense, SparseMatPolyCommitment, SparseMatPolyCommitmentGens,
+    SparseMatPolyEvalProof,
+    SparseMatPolynomial as SparseMatPolynomialFull,
+};
 use crate::timer::Timer;
-use crate::transcript::ProofTranscript;
+use crate::transcript::{AppendToTranscript, ProofTranscript};
 use flate2::{write::ZlibEncoder, Compression};
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
@@ -258,51 +261,75 @@ impl R1CSInstance {
 }
 
 /// Generators for R1CS commitments in SNARK mode
-#[derive(Serialize, Deserialize)]
+/// Uses full sparse matrix polynomial commitment generators
 pub struct R1CSCommitmentGens {
-    pub gens: PolyCommitmentGens,
+    pub gens: SparseMatPolyCommitmentGens,
 }
 
 impl R1CSCommitmentGens {
     /// Create new generators for R1CS commitment
-    pub fn new(label: &'static [u8], num_cons: usize, num_vars: usize, num_inputs: usize) -> Self {
+    /// 
+    /// IMPORTANT: num_nz_entries should be the max of nnz_a, nnz_b, nnz_c
+    /// Using a smaller value will cause panics during commitment!
+    pub fn new(label: &'static [u8], num_cons: usize, num_vars: usize, num_nz_entries: usize) -> Self {
         let num_poly_vars_x = num_cons.log_2();
         let num_poly_vars_y = (2 * num_vars).log_2();
-        let total_vars = num_poly_vars_x + num_poly_vars_y;
         
         R1CSCommitmentGens {
-            gens: PolyCommitmentGens::new(total_vars, label),
+            gens: SparseMatPolyCommitmentGens::new(
+                label,
+                num_poly_vars_x,
+                num_poly_vars_y,
+                num_nz_entries.next_power_of_two(),
+                3, // 3 matrices: A, B, C
+            ),
         }
     }
 }
 
 /// Commitment to R1CS matrices (A, B, C)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Uses full sparse matrix polynomial commitment
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct R1CSCommitment {
     pub num_cons: usize,
     pub num_vars: usize,
     pub num_inputs: usize,
-    pub comm: CompressedGroup,
+    pub comm: SparseMatPolyCommitment,
+}
+
+impl AppendToTranscript for R1CSCommitment {
+    fn append_to_transcript(&self, _label: &'static [u8], transcript: &mut Transcript) {
+        // Match arkworks-spartan's R1CSCommitment.append_to_transcript
+        transcript.append_u64(b"num_cons", self.num_cons as u64);
+        transcript.append_u64(b"num_vars", self.num_vars as u64);
+        transcript.append_u64(b"num_inputs", self.num_inputs as u64);
+        self.comm.append_to_transcript(b"comm", transcript);
+    }
 }
 
 /// Decommitment for R1CS (used by prover)
-/// For large circuits, we use a sparse representation to avoid memory blowup
+/// Contains the dense representation needed for the full evaluation proof
 pub struct R1CSDecommitment {
-    /// Digest of the R1CS for verification
-    pub digest: Vec<u8>,
+    /// Dense representation of sparse matrices for full evaluation proof
+    pub dense: MultiSparseMatPolynomialAsDense,
 }
 
 impl R1CSShape {
     /// Commit to the R1CS shape for SNARK mode
-    /// This is a lightweight commitment using cryptographic hashing
-    /// For full succinctness, use polynomial commitments (but requires more memory)
-    pub fn commit(&self, _gens: &R1CSCommitmentGens) -> (R1CSCommitment, R1CSDecommitment) {
+    /// Uses full sparse matrix polynomial commitment for cryptographic soundness
+    pub fn commit(&self, gens: &R1CSCommitmentGens) -> (R1CSCommitment, R1CSDecommitment) {
         let timer = Timer::new("R1CSShape::commit");
         
-        // Create commitment using digest (hash-based commitment)
-        // This is efficient for large circuits but provides slightly weaker succinctness
-        let digest_bytes = self.get_digest();
-        let comm = CompressedGroup::from_bytes(&digest_bytes);
+        // Convert to sparse_mlpoly_full format
+        let mat_a = self.to_sparse_mat_poly_full(&self.A);
+        let mat_b = self.to_sparse_mat_poly_full(&self.B);
+        let mat_c = self.to_sparse_mat_poly_full(&self.C);
+        
+        // Create commitment using full sparse matrix polynomial commitment
+        let (comm, dense) = SparseMatPolynomialFull::multi_commit(
+            &[&mat_a, &mat_b, &mat_c],
+            &gens.gens,
+        );
         
         timer.stop();
         
@@ -313,94 +340,90 @@ impl R1CSShape {
                 num_inputs: self.num_inputs,
                 comm,
             },
-            R1CSDecommitment { digest: digest_bytes },
+            R1CSDecommitment { dense },
         )
+    }
+    
+    /// Convert sparse matrix polynomial to the full format
+    fn to_sparse_mat_poly_full(&self, mat: &SparseMatPolynomial) -> SparseMatPolynomialFull {
+        use crate::sparse_mlpoly_full::SparseMatEntry as SparseMatEntryFull;
+        
+        let entries: Vec<SparseMatEntryFull> = mat
+            .get_entries()
+            .iter()
+            .map(|e| SparseMatEntryFull::new(e.row(), e.col(), e.val()))
+            .collect();
+        
+        SparseMatPolynomialFull::new(mat.num_vars_x(), mat.num_vars_y(), entries)
     }
 }
 
 /// Proof of evaluation of R1CS matrices at random point
-#[derive(Debug, Serialize, Deserialize)]
+/// Uses full sparse matrix polynomial evaluation proof (same as original Spartan)
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct R1CSEvalProof {
-    /// Claimed evaluations (included in proof for verification)
-    claimed_evals: (Scalar, Scalar, Scalar),
+    /// Full sparse matrix polynomial evaluation proof
+    proof: SparseMatPolyEvalProof,
 }
 
 impl R1CSEvalProof {
     /// Prove evaluations of A, B, C at (rx, ry)
-    /// This is a simplified version that includes the evaluations in the proof
-    /// The full Spartan uses polynomial commitments with opening proofs
+    /// Uses full sparse matrix polynomial evaluation proof with memory-checking
     pub fn prove(
         decomm: &R1CSDecommitment,
         rx: &[Scalar],
         ry: &[Scalar],
         evals: &(Scalar, Scalar, Scalar),
-        _gens: &R1CSCommitmentGens,
+        gens: &R1CSCommitmentGens,
         transcript: &mut Transcript,
-        _random_tape: &mut RandomTape,
+        random_tape: &mut RandomTape,
     ) -> Self {
         let timer = Timer::new("R1CSEvalProof::prove");
-        transcript.append_protocol_name(b"R1CS_eval_proof");
         
-        // Append digest to transcript for binding
-        transcript.append_message(b"r1cs_digest", &decomm.digest);
-        
-        // Append evaluation point to transcript
-        for r in rx.iter() {
-            transcript.append_scalar(b"rx", r);
-        }
-        for r in ry.iter() {
-            transcript.append_scalar(b"ry", r);
-        }
-        
-        // Append evaluations to transcript
         let (eval_A, eval_B, eval_C) = evals;
-        transcript.append_scalar(b"eval_A", eval_A);
-        transcript.append_scalar(b"eval_B", eval_B);
-        transcript.append_scalar(b"eval_C", eval_C);
+        let evals_vec = vec![*eval_A, *eval_B, *eval_C];
+        
+        let proof = SparseMatPolyEvalProof::prove(
+            &decomm.dense,
+            rx,
+            ry,
+            &evals_vec,
+            &gens.gens,
+            transcript,
+            random_tape,
+        );
         
         timer.stop();
         
-        R1CSEvalProof {
-            claimed_evals: *evals,
-        }
+        R1CSEvalProof { proof }
     }
     
     /// Verify evaluations of A, B, C
     pub fn verify(
         &self,
-        _comm: &R1CSCommitment,
+        comm: &R1CSCommitment,
         rx: &[Scalar],
         ry: &[Scalar],
         evals: &(Scalar, Scalar, Scalar),
-        _gens: &R1CSCommitmentGens,
+        gens: &R1CSCommitmentGens,
         transcript: &mut Transcript,
     ) -> Result<(), ProofVerifyError> {
         let timer = Timer::new("R1CSEvalProof::verify");
-        transcript.append_protocol_name(b"R1CS_eval_proof");
         
-        // Append evaluation point to transcript
-        for r in rx.iter() {
-            transcript.append_scalar(b"rx", r);
-        }
-        for r in ry.iter() {
-            transcript.append_scalar(b"ry", r);
-        }
+        let (eval_A, eval_B, eval_C) = evals;
+        let evals_vec = vec![*eval_A, *eval_B, *eval_C];
         
-        // Append evaluations to transcript
-        let (eval_A, eval_B, eval_C) = &self.claimed_evals;
-        transcript.append_scalar(b"eval_A", eval_A);
-        transcript.append_scalar(b"eval_B", eval_B);
-        transcript.append_scalar(b"eval_C", eval_C);
-        
-        // Check that claimed evaluations match provided evaluations
-        if self.claimed_evals != *evals {
-            return Err(ProofVerifyError::VerificationFailed(
-                "R1CS evaluation mismatch".to_string(),
-            ));
-        }
+        let result = self.proof.verify(
+            &comm.comm,
+            rx,
+            ry,
+            &evals_vec,
+            &gens.gens,
+            transcript,
+        );
         
         timer.stop();
-        Ok(())
+        result
     }
 }
 

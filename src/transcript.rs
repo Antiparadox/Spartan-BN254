@@ -1,7 +1,8 @@
 //! Fiat-Shamir transcript using Merlin
 
-use crate::group::CompressedGroup;
+use crate::group::{CompressedGroup, GroupElement};
 use crate::scalar::Scalar;
+use ark_serialize::CanonicalSerialize;
 use merlin::Transcript;
 
 /// Trait for appending data to a transcript
@@ -95,5 +96,14 @@ impl AppendToTranscript for Vec<Scalar> {
 impl AppendToTranscript for CompressedGroup {
     fn append_to_transcript(&self, label: &'static [u8], transcript: &mut Transcript) {
         transcript.append_point(label, self);
+    }
+}
+
+impl AppendToTranscript for GroupElement {
+    fn append_to_transcript(&self, label: &'static [u8], transcript: &mut Transcript) {
+        // Serialize as projective point (matches arkworks-spartan format)
+        let mut bytes = Vec::new();
+        self.serialize_compressed(&mut bytes).unwrap();
+        transcript.append_message(label, &bytes);
     }
 }

@@ -1,19 +1,22 @@
 //! SNARK and NIZK high-level interfaces
 //! Port of Spartan's top-level SNARK and NIZK from lib.rs
 
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::errors::{ProofVerifyError, R1CSError};
 use crate::r1cs::{R1CSCommitment, R1CSCommitmentGens, R1CSDecommitment, R1CSEvalProof, R1CSShape};
 use crate::r1csproof::{R1CSGens, R1CSProof};
 use crate::random::RandomTape;
 use crate::scalar::Scalar;
 use crate::timer::Timer;
-use crate::transcript::ProofTranscript;
+use crate::transcript::{AppendToTranscript, ProofTranscript};
 use merlin::Transcript;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 
 /// Assignment of values to variables
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Assignment {
     pub assignment: Vec<Scalar>,
 }
@@ -177,8 +180,14 @@ impl NIZKGens {
     }
 }
 
-/// NIZK proof - verifier needs full R1CS
-#[derive(Serialize, Deserialize, Debug)]
+/// NIZK proof - non-interactive zero-knowledge proof
+/// 
+/// Note: For NIZK (unlike SNARK), the `r` vectors ARE needed because:
+/// 1. Verifier must evaluate R1CS at (rx, ry) BEFORE sumcheck verification
+/// 2. These evaluations are inputs to the sumcheck
+/// 3. Sumcheck then produces (rx', ry') which must match
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NIZK {
     r1cs_sat_proof: R1CSProof,
     r: (Vec<Scalar>, Vec<Scalar>),
@@ -213,17 +222,14 @@ impl NIZK {
                 }
             };
 
-            let (proof, rx, ry) = R1CSProof::prove(
+            R1CSProof::prove(
                 &inst.inst,
                 padded_vars.assignment,
                 &input.assignment,
                 &gens.gens_r1cs_sat,
                 transcript,
                 &mut random_tape,
-            );
-            let proof_encoded = bincode::serialize(&proof).unwrap();
-            Timer::print(&format!("len_r1cs_sat_proof {:?}", proof_encoded.len()));
-            (proof, rx, ry)
+            )
         };
 
         timer_prove.stop();
@@ -288,7 +294,14 @@ pub struct SNARKGens {
 
 impl SNARKGens {
     /// Create generators for the given R1CS dimensions
-    pub fn new(num_cons: usize, num_vars: usize, num_inputs: usize) -> Self {
+    /// 
+    /// # Arguments
+    /// * `num_cons` - Number of constraints (will be padded to power of 2)
+    /// * `num_vars` - Number of variables (will be padded to power of 2)
+    /// * `num_inputs` - Number of public inputs
+    /// * `num_nz_entries` - Maximum number of non-zero entries across A, B, C matrices
+    ///                      (i.e., max(nnz_a, nnz_b, nnz_c))
+    pub fn new(num_cons: usize, num_vars: usize, num_inputs: usize, num_nz_entries: usize) -> Self {
         let num_vars_padded = {
             let mut n = max(num_vars, num_inputs + 1);
             if n.next_power_of_two() != n {
@@ -305,7 +318,7 @@ impl SNARKGens {
         };
 
         let gens_r1cs_sat = R1CSGens::new(b"gens_r1cs_sat", num_cons_padded, num_vars_padded);
-        let gens_r1cs_eval = R1CSCommitmentGens::new(b"gens_r1cs_eval", num_cons_padded, num_vars_padded, num_inputs);
+        let gens_r1cs_eval = R1CSCommitmentGens::new(b"gens_r1cs_eval", num_cons_padded, num_vars_padded, num_nz_entries);
 
         SNARKGens {
             gens_r1cs_sat,
@@ -315,12 +328,21 @@ impl SNARKGens {
 }
 
 /// SNARK proof - succinct verification, verifier doesn't need full R1CS
-#[derive(Serialize, Deserialize, Debug)]
+/// 
+/// Note: The random points (rx, ry) are NOT stored in the proof because
+/// the verifier recomputes them from the Fiat-Shamir transcript.
+/// 
+/// Serialization is OPTIONAL - only needed if you're sending the proof
+/// over a network or saving to disk. For in-process verification,
+/// just pass the SNARK struct directly.
+/// 
+/// Uses CanonicalSerialize for cross-verification compatibility with arkworks-spartan.
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SNARK {
     r1cs_sat_proof: R1CSProof,
     inst_evals: (Scalar, Scalar, Scalar),
     r1cs_eval_proof: R1CSEvalProof,
-    r: (Vec<Scalar>, Vec<Scalar>),
 }
 
 impl SNARK {
@@ -353,8 +375,8 @@ impl SNARK {
         let mut random_tape = RandomTape::new(b"snark_proof");
 
         transcript.append_protocol_name(SNARK::protocol_name());
-        // Use the commitment bytes for transcript consistency with verifier
-        transcript.append_message(b"R1CSShapeDigest", &comm.comm.as_bytes());
+        // Use the commitment append_to_transcript for consistency with arkworks-spartan
+        comm.append_to_transcript(b"comm", transcript);
 
         let (r1cs_sat_proof, rx, ry) = {
             let padded_vars = {
@@ -366,17 +388,14 @@ impl SNARK {
                 }
             };
 
-            let (proof, rx, ry) = R1CSProof::prove(
+            R1CSProof::prove(
                 &inst.inst,
                 padded_vars.assignment,
                 &input.assignment,
                 &gens.gens_r1cs_sat,
                 transcript,
                 &mut random_tape,
-            );
-            let proof_encoded = bincode::serialize(&proof).unwrap();
-            Timer::print(&format!("len_r1cs_sat_proof {:?}", proof_encoded.len()));
-            (proof, rx, ry)
+            )
         };
 
         // Compute evaluations of A, B, C at (rx, ry)
@@ -398,7 +417,6 @@ impl SNARK {
             r1cs_sat_proof,
             inst_evals,
             r1cs_eval_proof,
-            r: (rx, ry),
         }
     }
 
@@ -413,32 +431,21 @@ impl SNARK {
         let timer_verify = Timer::new("SNARK::verify");
 
         transcript.append_protocol_name(SNARK::protocol_name());
-        // Use the commitment as the digest
-        transcript.append_message(b"R1CSShapeDigest", &comm.comm.as_bytes());
-
-        let (claimed_rx, claimed_ry) = &self.r;
+        // Use the commitment append_to_transcript for consistency with arkworks-spartan
+        comm.append_to_transcript(b"comm", transcript);
 
         let timer_sat_proof = Timer::new("verify_sat_proof");
         assert_eq!(input.assignment.len(), comm.num_inputs);
-        let verify_result = self.r1cs_sat_proof.verify(
+        
+        // Verify R1CS satisfiability proof - this derives rx, ry from the transcript
+        let (rx, ry) = self.r1cs_sat_proof.verify(
             comm.num_vars,
             comm.num_cons,
             &input.assignment,
             &self.inst_evals,
             transcript,
             &gens.gens_r1cs_sat,
-        );
-        let (rx, ry) = match verify_result {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("R1CS sat proof verification failed: {:?}", e);
-                return Err(e);
-            }
-        };
-
-        // verify that claimed rx and ry are correct
-        assert_eq!(rx, *claimed_rx);
-        assert_eq!(ry, *claimed_ry);
+        )?;
         timer_sat_proof.stop();
 
         // Verify the R1CS evaluation proof
