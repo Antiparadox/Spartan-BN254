@@ -82,12 +82,53 @@ The main commitment in Spartan is the **Derefs commitment** (looked-up eq-polyno
 
 ## Proof Size Breakdown
 
+### Top-Level Structure
+
 | Component | Hyrax | KZG |
 |-----------|-------|-----|
 | R1CS Sat Proof | 45.9 KB | 45.9 KB |
 | R1CS Eval Proof | 200.4 KB | 71.6 KB |
-| inst_evals | 96 B | 96 B |
+| inst_evals (3 scalars) | 96 B | 96 B |
 | **TOTAL** | **246.4 KB** | **117.6 KB** |
+
+### R1CS Sat Proof (Same for Both)
+
+| Component | Size | Description |
+|-----------|------|-------------|
+| comm_vars (witness commitment) | ~2 KB | O(√n) points |
+| sc_proof_phase1 (sumcheck) | ~20 KB | log(n) rounds × DotProductProof |
+| claims_phase2 (4 points) | 128 B | 4 × GroupElement |
+| pok_claims_phase2 | ~1 KB | KnowledgeProof + ProductProof |
+| proof_eq_sc_phase1 | ~0.5 KB | EqualityProof |
+| sc_proof_phase2 (sumcheck) | ~20 KB | log(n) rounds × DotProductProof |
+| proof_eq_sc_phase2 | ~0.5 KB | EqualityProof |
+| **Subtotal** | **~46 KB** | |
+
+### R1CS Eval Proof (Lookup Argument) - THE KEY DIFFERENCE
+
+| Component | Hyrax | KZG | Notes |
+|-----------|-------|-----|-------|
+| **DerefsCommitment** | **~130 KB** | **64 B** | Hyrax O(√n), KZG O(1) |
+| ProductLayerProof | ~35 KB | ~35 KB | Scalars + batched circuit proofs |
+| HashLayerProof.eval_* | ~3 KB | ~3 KB | Evaluation scalars |
+| HashLayerProof.proof_ops | ~15 KB | ~15 KB | Hyrax log-sized opening |
+| HashLayerProof.proof_mem | ~15 KB | ~15 KB | Hyrax log-sized opening |
+| **HashLayerProof.proof_derefs** | **~2 KB** | **~64 B** | Hyrax log(n), KZG O(1) |
+| **Subtotal** | **~200 KB** | **~72 KB** | |
+
+### Why Hyrax DerefsCommitment is Large
+
+```
+Derefs = 2 polynomials (row_derefs, col_derefs)
+Each polynomial has NNZ_padded = 2^22 = 4,194,304 evaluations
+
+Hyrax commits to √n rows:
+  √(4,194,304) = 2,048 points per polynomial
+  2 polynomials × 2,048 points × 32 bytes = 131,072 bytes ≈ 128 KB
+
+KZG commits to single point:
+  2 polynomials × 1 point × 32 bytes = 64 bytes
+```
 
 ---
 

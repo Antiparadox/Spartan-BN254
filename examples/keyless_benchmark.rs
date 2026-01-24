@@ -33,7 +33,7 @@ const R1CS_PATH: &str = "/Users/yinuo/Desktop/Universal ZK/keyless-zk-proofs/mai
 const WTNS_PATH: &str = "/Users/yinuo/Desktop/Universal ZK/keyless-zk-proofs/witness_real.wtns";
 
 #[cfg(feature = "kzg")]
-const SRS_PATH: &str = "/Users/yinuo/Desktop/Universal ZK/benchmark_results/kzg_srs_keyless.bin";
+const SRS_PATH: &str = "data/kzg_srs_keyless.bin";  // Local, ignored by git
 
 fn parse_wtns(path: &str) -> Result<Vec<Scalar>, Box<dyn std::error::Error>> {
     let mut file = File::open(path)?;

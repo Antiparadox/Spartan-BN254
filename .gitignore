@@ -16,3 +16,8 @@ Thumbs.db
 *.wtns
 *.zkey
 *.ptau
+
+# KZG trusted setup (large file, generated locally)
+data/
+*.srs
+*.bin
