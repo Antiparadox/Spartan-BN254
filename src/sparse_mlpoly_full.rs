@@ -13,12 +13,20 @@
 //! - HashLayerProof: Proves hash layer consistency
 //! - ProductLayerProof: Proves product layer consistency
 //! - SparseMatPolyEvalProof: Final sparse matrix evaluation proof
+//!
+//! Feature `kzg`: When enabled, uses KZG instead of Hyrax for polynomial
+//! commitments, resulting in O(1) proof size instead of O(√n).
 
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 #![allow(non_snake_case)]
 
-use crate::dense_mlpoly::{DensePolynomial, EqPolynomial, PolyCommitment, PolyCommitmentGens, PolyEvalProof};
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use crate::hyrax::{DensePolynomial, EqPolynomial, PolyCommitment, PolyCommitmentGens, PolyEvalProof};
+
+// KZG imports when feature is enabled
+#[cfg(feature = "kzg")]
+use crate::kzg::{KZGSrs, KZGPolyCommitment, KZGPolyCommitmentGens, KZGProof, KZGCommitment};
 use crate::errors::ProofVerifyError;
 use crate::math::Math;
 use crate::product_tree::{DotProductCircuit, ProductCircuit, ProductCircuitEvalProofBatched};
@@ -288,17 +296,48 @@ impl Derefs {
         Derefs { row_ops_val, col_ops_val, comb }
     }
 
+    /// Commit using Hyrax (default)
+    #[cfg(not(feature = "kzg"))]
     pub fn commit(&self, gens: &PolyCommitmentGens) -> DerefsCommitment {
         let (comm_ops_val, _blinds) = self.comb.commit(gens, None);
         DerefsCommitment { comm_ops_val }
     }
+
+    /// Commit using KZG (when kzg feature enabled)
+    #[cfg(feature = "kzg")]
+    pub fn commit_kzg(&self, gens: &KZGPolyCommitmentGens) -> DerefsCommitment {
+        let evals: Vec<Scalar> = self.comb.evals().to_vec();
+        let comm = KZGPolyCommitment::commit(&evals, gens);
+        DerefsCommitment { comm_kzg: comm }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// DerefsCommitment using Hyrax (default)
+#[cfg(not(feature = "kzg"))]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DerefsCommitment {
     comm_ops_val: PolyCommitment,
 }
 
+/// DerefsCommitment using KZG (when kzg feature enabled)
+/// Note: No serde since KZGPolyCommitment uses arkworks serialization
+#[cfg(feature = "kzg")]
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub struct DerefsCommitment {
+    pub comm_kzg: KZGPolyCommitment,
+}
+
+// Helper methods for Derefs to work with both Hyrax and KZG
+#[cfg(feature = "kzg")]
+impl Derefs {
+    /// Commit using Hyrax (still needed for ops/mem proofs)
+    pub fn commit(&self, gens: &PolyCommitmentGens) -> crate::hyrax::PolyCommitment {
+        let (comm_ops_val, _blinds) = self.comb.commit(gens, None);
+        comm_ops_val
+    }
+}
+
+#[cfg(not(feature = "kzg"))]
 impl AppendToTranscript for DerefsCommitment {
     fn append_to_transcript(&self, label: &'static [u8], transcript: &mut Transcript) {
         transcript.append_message(b"derefs_commitment", b"begin_derefs_commitment");
@@ -307,15 +346,26 @@ impl AppendToTranscript for DerefsCommitment {
     }
 }
 
+#[cfg(feature = "kzg")]
+impl AppendToTranscript for DerefsCommitment {
+    fn append_to_transcript(&self, label: &'static [u8], transcript: &mut Transcript) {
+        transcript.append_message(b"derefs_commitment", b"begin_derefs_commitment");
+        self.comm_kzg.append_to_transcript(label, transcript);
+        transcript.append_message(b"derefs_commitment", b"end_derefs_commitment");
+    }
+}
+
 // ============================================================================
-// DerefsEvalProof
+// DerefsEvalProof - Hyrax version (default)
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(not(feature = "kzg"))]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DerefsEvalProof {
     proof_derefs: PolyEvalProof,
 }
 
+#[cfg(not(feature = "kzg"))]
 impl DerefsEvalProof {
     fn protocol_name() -> &'static [u8] {
         b"Derefs evaluation proof"
@@ -432,16 +482,132 @@ impl DerefsEvalProof {
 }
 
 // ============================================================================
-// Commitment Generators for Sparse Matrix Polynomial
+// DerefsEvalProof - KZG version (when feature enabled)
 // ============================================================================
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SparseMatPolyCommitmentGens {
-    gens_ops: PolyCommitmentGens,
-    gens_mem: PolyCommitmentGens,
-    gens_derefs: PolyCommitmentGens,
+#[cfg(feature = "kzg")]
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub struct DerefsEvalProof {
+    /// KZG opening proof
+    proof: ark_bn254::G1Affine,
+    /// Evaluation at the challenge point
+    eval: Scalar,
 }
 
+#[cfg(feature = "kzg")]
+impl DerefsEvalProof {
+    fn protocol_name() -> &'static [u8] {
+        b"Derefs evaluation proof (KZG)"
+    }
+
+    pub fn prove(
+        derefs: &Derefs,
+        eval_row_ops_val_vec: &[Scalar],
+        eval_col_ops_val_vec: &[Scalar],
+        r: &[Scalar],
+        gens: &KZGPolyCommitmentGens,
+        transcript: &mut Transcript,
+        _random_tape: &mut RandomTape,
+    ) -> Self {
+        transcript.append_protocol_name(DerefsEvalProof::protocol_name());
+
+        let evals = {
+            let mut evals = eval_row_ops_val_vec.to_owned();
+            evals.extend(eval_col_ops_val_vec);
+            evals.resize(evals.len().next_power_of_two(), Scalar::zero());
+            evals
+        };
+        
+        // Append evals to transcript
+        evals.append_to_transcript(b"evals_ops_val", transcript);
+
+        // n-to-1 reduction
+        let challenges = transcript.challenge_vector(b"challenge_combine_n_to_one", evals.len().log_2());
+        let mut poly_evals = DensePolynomial::new(evals);
+        for i in (0..challenges.len()).rev() {
+            poly_evals.bound_poly_var_bot(&challenges[i]);
+        }
+        assert_eq!(poly_evals.len(), 1);
+        let joint_claim_eval = poly_evals[0];
+        let mut r_joint = challenges;
+        r_joint.extend(r);
+
+        joint_claim_eval.append_to_transcript(b"joint_claim_eval", transcript);
+        
+        // Get challenge point for KZG opening
+        let eval_point = transcript.challenge_scalar(b"kzg_eval_point");
+        
+        // Get polynomial coefficients
+        let poly_coeffs: Vec<Scalar> = derefs.comb.evals().to_vec();
+        
+        // Create KZG opening proof
+        let (kzg_proof, eval) = KZGProof::prove(&poly_coeffs, &eval_point, &gens.srs);
+        
+        DerefsEvalProof {
+            proof: kzg_proof.proof,
+            eval,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        r: &[Scalar],
+        eval_row_ops_val_vec: &[Scalar],
+        eval_col_ops_val_vec: &[Scalar],
+        gens: &KZGPolyCommitmentGens,
+        comm: &DerefsCommitment,
+        transcript: &mut Transcript,
+    ) -> Result<(), ProofVerifyError> {
+        transcript.append_protocol_name(DerefsEvalProof::protocol_name());
+        
+        let mut evals = eval_row_ops_val_vec.to_owned();
+        evals.extend(eval_col_ops_val_vec);
+        evals.resize(evals.len().next_power_of_two(), Scalar::zero());
+
+        // Append evals to transcript
+        evals.append_to_transcript(b"evals_ops_val", transcript);
+
+        // n-to-1 reduction
+        let challenges = transcript.challenge_vector(b"challenge_combine_n_to_one", evals.len().log_2());
+        let mut poly_evals = DensePolynomial::new(evals);
+        for i in (0..challenges.len()).rev() {
+            poly_evals.bound_poly_var_bot(&challenges[i]);
+        }
+        assert_eq!(poly_evals.len(), 1);
+        let joint_claim_eval = poly_evals[0];
+        let mut r_joint = challenges;
+        r_joint.extend(r);
+
+        joint_claim_eval.append_to_transcript(b"joint_claim_eval", transcript);
+        
+        // Get same challenge point
+        let eval_point = transcript.challenge_scalar(b"kzg_eval_point");
+        
+        // Verify KZG proof
+        let kzg_proof = KZGProof { proof: self.proof };
+        let kzg_comm = KZGCommitment { commitment: comm.comm_kzg.commitment };
+        
+        if kzg_proof.verify(&kzg_comm, &eval_point, &self.eval, &gens.srs) {
+            Ok(())
+        } else {
+            Err(ProofVerifyError::InternalError)
+        }
+    }
+}
+
+// ============================================================================
+// Commitment Generators for Sparse Matrix Polynomial - Hyrax version
+// ============================================================================
+
+#[cfg(not(feature = "kzg"))]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SparseMatPolyCommitmentGens {
+    pub gens_ops: PolyCommitmentGens,
+    pub gens_mem: PolyCommitmentGens,
+    pub gens_derefs: PolyCommitmentGens,
+}
+
+#[cfg(not(feature = "kzg"))]
 impl SparseMatPolyCommitmentGens {
     pub fn new(
         label: &'static [u8],
@@ -465,10 +631,74 @@ impl SparseMatPolyCommitmentGens {
 }
 
 // ============================================================================
+// Commitment Generators for Sparse Matrix Polynomial - KZG version
+// ============================================================================
+
+#[cfg(feature = "kzg")]
+#[derive(Clone)]
+pub struct SparseMatPolyCommitmentGens {
+    pub gens_ops: PolyCommitmentGens,
+    pub gens_mem: PolyCommitmentGens,
+    /// KZG generators for derefs (replaces Hyrax)
+    pub gens_derefs_kzg: KZGPolyCommitmentGens,
+}
+
+#[cfg(feature = "kzg")]
+impl SparseMatPolyCommitmentGens {
+    /// Create new generators with KZG for derefs
+    /// Requires KZG SRS to be provided
+    pub fn new_with_kzg(
+        label: &'static [u8],
+        num_vars_x: usize,
+        num_vars_y: usize,
+        num_nz_entries: usize,
+        batch_size: usize,
+        kzg_srs: KZGSrs,
+    ) -> Self {
+        let num_vars_ops = num_nz_entries.next_power_of_two().log_2() 
+            + (batch_size * 5).next_power_of_two().log_2();
+        let num_vars_mem = std::cmp::max(num_vars_x, num_vars_y) + 1;
+
+        let gens_ops = PolyCommitmentGens::new(num_vars_ops, label);
+        let gens_mem = PolyCommitmentGens::new(num_vars_mem, label);
+        let gens_derefs_kzg = KZGPolyCommitmentGens::new(kzg_srs);
+        
+        SparseMatPolyCommitmentGens { gens_ops, gens_mem, gens_derefs_kzg }
+    }
+    
+    /// Load or generate KZG SRS and create generators
+    pub fn new_with_kzg_from_file(
+        label: &'static [u8],
+        num_vars_x: usize,
+        num_vars_y: usize,
+        num_nz_entries: usize,
+        batch_size: usize,
+        srs_path: &str,
+        seed: u64,
+    ) -> std::io::Result<Self> {
+        let num_vars_ops = num_nz_entries.next_power_of_two().log_2() 
+            + (batch_size * 5).next_power_of_two().log_2();
+        let num_vars_mem = std::cmp::max(num_vars_x, num_vars_y) + 1;
+        let num_vars_derefs = num_nz_entries.next_power_of_two().log_2() 
+            + (batch_size * 2).next_power_of_two().log_2();
+        
+        // SRS size needed for derefs polynomial
+        let srs_size = (1 << num_vars_derefs) + 1;
+
+        let gens_ops = PolyCommitmentGens::new(num_vars_ops, label);
+        let gens_mem = PolyCommitmentGens::new(num_vars_mem, label);
+        let kzg_srs = KZGSrs::load_or_generate(srs_path, srs_size, seed)?;
+        let gens_derefs_kzg = KZGPolyCommitmentGens::new(kzg_srs);
+        
+        Ok(SparseMatPolyCommitmentGens { gens_ops, gens_mem, gens_derefs_kzg })
+    }
+}
+
+// ============================================================================
 // Sparse Matrix Polynomial Commitment
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SparseMatPolyCommitment {
     batch_size: usize,
     num_ops: usize,
@@ -487,12 +717,19 @@ impl AppendToTranscript for SparseMatPolyCommitment {
     }
 }
 
+impl SparseMatPolyCommitment {
+    /// Convert commitment to bytes for transcript binding
+    pub fn as_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap()
+    }
+}
+
 // ============================================================================
 // Product Layer for Memory Checking
 // ============================================================================
 
 #[derive(Debug)]
-struct ProductLayer {
+pub struct ProductLayer {
     init: ProductCircuit,
     read_vec: Vec<ProductCircuit>,
     write_vec: Vec<ProductCircuit>,
@@ -500,7 +737,7 @@ struct ProductLayer {
 }
 
 #[derive(Debug)]
-struct Layers {
+pub struct Layers {
     prod_layer: ProductLayer,
 }
 
@@ -608,7 +845,7 @@ impl Layers {
 // ============================================================================
 
 #[derive(Debug)]
-struct PolyEvalNetwork {
+pub struct PolyEvalNetwork {
     row_layers: Layers,
     col_layers: Layers,
 }
@@ -632,7 +869,20 @@ impl PolyEvalNetwork {
 // Hash Layer Proof
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(not(feature = "kzg"))]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
+pub struct HashLayerProof {
+    eval_row: (Vec<Scalar>, Vec<Scalar>, Scalar),
+    eval_col: (Vec<Scalar>, Vec<Scalar>, Scalar),
+    eval_val: Vec<Scalar>,
+    eval_derefs: (Vec<Scalar>, Vec<Scalar>),
+    proof_ops: PolyEvalProof,
+    proof_mem: PolyEvalProof,
+    proof_derefs: DerefsEvalProof,
+}
+
+#[cfg(feature = "kzg")]
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HashLayerProof {
     eval_row: (Vec<Scalar>, Vec<Scalar>, Scalar),
     eval_col: (Vec<Scalar>, Vec<Scalar>, Scalar),
@@ -691,6 +941,7 @@ impl HashLayerProof {
             .map(|col| col.evaluate(rand_ops))
             .collect();
         
+        #[cfg(not(feature = "kzg"))]
         let proof_derefs = DerefsEvalProof::prove(
             derefs,
             &eval_row_ops_val,
@@ -700,6 +951,18 @@ impl HashLayerProof {
             transcript,
             random_tape,
         );
+        
+        #[cfg(feature = "kzg")]
+        let proof_derefs = DerefsEvalProof::prove(
+            derefs,
+            &eval_row_ops_val,
+            &eval_col_ops_val,
+            rand_ops,
+            &gens.gens_derefs_kzg,
+            transcript,
+            random_tape,
+        );
+        
         let eval_derefs = (eval_row_ops_val, eval_col_ops_val);
 
         // Evaluate components
@@ -869,11 +1132,22 @@ impl HashLayerProof {
         let (eval_row_ops_val, eval_col_ops_val) = &self.eval_derefs;
 
         // Verify derefs proof
+        #[cfg(not(feature = "kzg"))]
         self.proof_derefs.verify(
             rand_ops,
             eval_row_ops_val,
             eval_col_ops_val,
             &gens.gens_derefs,
+            comm_derefs,
+            transcript,
+        )?;
+        
+        #[cfg(feature = "kzg")]
+        self.proof_derefs.verify(
+            rand_ops,
+            eval_row_ops_val,
+            eval_col_ops_val,
+            &gens.gens_derefs_kzg,
             comm_derefs,
             transcript,
         )?;
@@ -1015,7 +1289,7 @@ impl IdentityPolynomial {
 // Product Layer Proof  
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ProductLayerProof {
     eval_row: (Scalar, Vec<Scalar>, Vec<Scalar>, Scalar),
     eval_col: (Scalar, Vec<Scalar>, Vec<Scalar>, Scalar),
@@ -1250,7 +1524,15 @@ impl ProductLayerProof {
 // Polynomial Evaluation Network Proof
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(not(feature = "kzg"))]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
+pub struct PolyEvalNetworkProof {
+    proof_prod_layer: ProductLayerProof,
+    proof_hash_layer: HashLayerProof,
+}
+
+#[cfg(feature = "kzg")]
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PolyEvalNetworkProof {
     proof_prod_layer: ProductLayerProof,
     proof_hash_layer: HashLayerProof,
@@ -1372,7 +1654,15 @@ impl PolyEvalNetworkProof {
 // Sparse Matrix Polynomial Evaluation Proof (Final SNARK Component)
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(not(feature = "kzg"))]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
+pub struct SparseMatPolyEvalProof {
+    comm_derefs: DerefsCommitment,
+    poly_eval_network_proof: PolyEvalNetworkProof,
+}
+
+#[cfg(feature = "kzg")]
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SparseMatPolyEvalProof {
     comm_derefs: DerefsCommitment,
     poly_eval_network_proof: PolyEvalNetworkProof,
@@ -1383,7 +1673,12 @@ impl SparseMatPolyEvalProof {
         b"Sparse polynomial evaluation proof"
     }
 
-    fn equalize(rx: &[Scalar], ry: &[Scalar]) -> (Vec<Scalar>, Vec<Scalar>) {
+    /// Construct from parts (for instrumented proving)
+    pub fn from_parts(comm_derefs: DerefsCommitment, poly_eval_network_proof: PolyEvalNetworkProof) -> Self {
+        Self { comm_derefs, poly_eval_network_proof }
+    }
+
+    pub fn equalize(rx: &[Scalar], ry: &[Scalar]) -> (Vec<Scalar>, Vec<Scalar>) {
         match rx.len().cmp(&ry.len()) {
             Ordering::Less => {
                 let diff = ry.len() - rx.len();
@@ -1401,6 +1696,7 @@ impl SparseMatPolyEvalProof {
         }
     }
 
+    #[cfg(not(feature = "kzg"))]
     pub fn prove(
         dense: &MultiSparseMatPolynomialAsDense,
         rx: &[Scalar],
@@ -1423,9 +1719,67 @@ impl SparseMatPolyEvalProof {
 
         let derefs = dense.deref(&mem_rx, &mem_ry);
 
-        // Commit to derefs
+        // Commit to derefs using Hyrax
         let comm_derefs = {
             let comm = derefs.commit(&gens.gens_derefs);
+            comm.append_to_transcript(b"comm_poly_row_col_ops_val", transcript);
+            comm
+        };
+
+        // Get random challenge for memory check
+        let r_mem_check = transcript.challenge_vector(b"challenge_r_hash", 2);
+
+        // Build evaluation network
+        let mut net = PolyEvalNetwork::new(
+            dense,
+            &derefs,
+            &mem_rx,
+            &mem_ry,
+            &(r_mem_check[0], r_mem_check[1]),
+        );
+
+        let poly_eval_network_proof = PolyEvalNetworkProof::prove(
+            &mut net,
+            dense,
+            &derefs,
+            evals,
+            gens,
+            transcript,
+            random_tape,
+        );
+
+        SparseMatPolyEvalProof {
+            comm_derefs,
+            poly_eval_network_proof,
+        }
+    }
+
+    #[cfg(feature = "kzg")]
+    pub fn prove(
+        dense: &MultiSparseMatPolynomialAsDense,
+        rx: &[Scalar],
+        ry: &[Scalar],
+        evals: &[Scalar],
+        gens: &SparseMatPolyCommitmentGens,
+        transcript: &mut Transcript,
+        random_tape: &mut RandomTape,
+    ) -> Self {
+        transcript.append_protocol_name(SparseMatPolyEvalProof::protocol_name());
+
+        assert_eq!(evals.len(), dense.batch_size);
+
+        let (mem_rx, mem_ry) = {
+            let (rx_ext, ry_ext) = SparseMatPolyEvalProof::equalize(rx, ry);
+            let poly_rx = EqPolynomial::new(rx_ext).evals();
+            let poly_ry = EqPolynomial::new(ry_ext).evals();
+            (poly_rx, poly_ry)
+        };
+
+        let derefs = dense.deref(&mem_rx, &mem_ry);
+
+        // Commit to derefs using KZG
+        let comm_derefs = {
+            let comm = derefs.commit_kzg(&gens.gens_derefs_kzg);
             comm.append_to_transcript(b"comm_poly_row_col_ops_val", transcript);
             comm
         };
@@ -1491,56 +1845,7 @@ impl SparseMatPolyEvalProof {
     }
 }
 
-// ============================================================================
-// R1CS Evaluation Proof using Sparse Matrix Polynomial
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct R1CSEvalProofFull {
-    proof: SparseMatPolyEvalProof,
-}
-
-impl R1CSEvalProofFull {
-    pub fn prove(
-        dense: &MultiSparseMatPolynomialAsDense,
-        rx: &[Scalar],
-        ry: &[Scalar],
-        evals: &(Scalar, Scalar, Scalar),
-        gens: &SparseMatPolyCommitmentGens,
-        transcript: &mut Transcript,
-        random_tape: &mut RandomTape,
-    ) -> Self {
-        let (eval_A, eval_B, eval_C) = evals;
-        let evals_vec = vec![*eval_A, *eval_B, *eval_C];
-
-        let proof = SparseMatPolyEvalProof::prove(
-            dense,
-            rx,
-            ry,
-            &evals_vec,
-            gens,
-            transcript,
-            random_tape,
-        );
-
-        R1CSEvalProofFull { proof }
-    }
-
-    pub fn verify(
-        &self,
-        comm: &SparseMatPolyCommitment,
-        rx: &[Scalar],
-        ry: &[Scalar],
-        evals: &(Scalar, Scalar, Scalar),
-        gens: &SparseMatPolyCommitmentGens,
-        transcript: &mut Transcript,
-    ) -> Result<(), ProofVerifyError> {
-        let (eval_A, eval_B, eval_C) = evals;
-        let evals_vec = vec![*eval_A, *eval_B, *eval_C];
-
-        self.proof.verify(comm, rx, ry, &evals_vec, gens, transcript)
-    }
-}
+// Note: R1CSEvalProof is now in r1cs.rs and wraps SparseMatPolyEvalProof
 
 #[cfg(test)]
 mod tests {

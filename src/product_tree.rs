@@ -1,7 +1,8 @@
 //! Product tree circuits for batch product verification
 //! Used in the memory-checking protocol for sparse polynomial evaluation
 
-use crate::dense_mlpoly::{DensePolynomial, EqPolynomial};
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use crate::hyrax::{DensePolynomial, EqPolynomial};
 use crate::math::Math;
 use crate::scalar::Scalar;
 use crate::sumcheck::SumcheckInstanceProof;
@@ -104,7 +105,7 @@ impl DotProductCircuit {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct LayerProof {
     pub proof: SumcheckInstanceProof,
     pub claims: Vec<Scalar>,
@@ -124,7 +125,7 @@ impl LayerProof {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct LayerProofBatched {
     pub proof: SumcheckInstanceProof,
     pub claims_prod_left: Vec<Scalar>,
@@ -145,12 +146,12 @@ impl LayerProofBatched {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ProductCircuitEvalProof {
     proof: Vec<LayerProof>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ProductCircuitEvalProofBatched {
     proof: Vec<LayerProofBatched>,
     pub claims_dotp: (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>),

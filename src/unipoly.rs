@@ -1,8 +1,9 @@
 //! Univariate polynomial representation
 //! Port of Spartan's unipoly.rs
 
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::commitments::{Commitments, MultiCommitGens};
-use crate::group::{CompressedGroup, GroupElement};
+use crate::group::GroupElement;
 use crate::scalar::Scalar;
 use crate::transcript::{AppendToTranscript, ProofTranscript};
 use merlin::Transcript;
@@ -17,7 +18,7 @@ pub struct UniPoly {
 
 /// Compressed univariate polynomial (without linear term)
 /// ax^2 + bx + c stored as vec![c, a]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct CompressedUniPoly {
     coeffs_except_linear_term: Vec<Scalar>,
 }
@@ -91,8 +92,8 @@ impl UniPoly {
         }
     }
 
-    pub fn commit(&self, gens: &MultiCommitGens, blind: &Scalar) -> CompressedGroup {
-        self.coeffs.commit(blind, gens).compress()
+    pub fn commit(&self, gens: &MultiCommitGens, blind: &Scalar) -> GroupElement {
+        self.coeffs.commit(blind, gens)
     }
 }
 

@@ -1,7 +1,7 @@
 //! R1CS constraint system for Spartan
 
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
-use crate::dense_mlpoly::DensePolynomial;
+use crate::hyrax::DensePolynomial;
 use crate::errors::{ProofVerifyError, R1CSError};
 use crate::math::Math;
 use crate::random::RandomTape;
@@ -266,8 +266,9 @@ pub struct R1CSCommitmentGens {
     pub gens: SparseMatPolyCommitmentGens,
 }
 
+#[cfg(not(feature = "kzg"))]
 impl R1CSCommitmentGens {
-    /// Create new generators for R1CS commitment
+    /// Create new generators for R1CS commitment (Hyrax mode)
     /// 
     /// IMPORTANT: num_nz_entries should be the max of nnz_a, nnz_b, nnz_c
     /// Using a smaller value will cause panics during commitment!
@@ -284,6 +285,60 @@ impl R1CSCommitmentGens {
                 3, // 3 matrices: A, B, C
             ),
         }
+    }
+}
+
+#[cfg(feature = "kzg")]
+impl R1CSCommitmentGens {
+    /// Create new generators for R1CS commitment (KZG mode)
+    /// 
+    /// IMPORTANT: num_nz_entries should be the max of nnz_a, nnz_b, nnz_c
+    /// Using a smaller value will cause panics during commitment!
+    pub fn new_with_kzg(
+        label: &'static [u8], 
+        num_cons: usize, 
+        num_vars: usize, 
+        num_nz_entries: usize,
+        kzg_srs: crate::kzg::KZGSrs,
+    ) -> Self {
+        let num_poly_vars_x = num_cons.log_2();
+        let num_poly_vars_y = (2 * num_vars).log_2();
+        
+        R1CSCommitmentGens {
+            gens: SparseMatPolyCommitmentGens::new_with_kzg(
+                label,
+                num_poly_vars_x,
+                num_poly_vars_y,
+                num_nz_entries.next_power_of_two(),
+                3, // 3 matrices: A, B, C
+                kzg_srs,
+            ),
+        }
+    }
+    
+    /// Create new generators from file or generate KZG SRS
+    pub fn new_with_kzg_from_file(
+        label: &'static [u8], 
+        num_cons: usize, 
+        num_vars: usize, 
+        num_nz_entries: usize,
+        srs_path: &str,
+        seed: u64,
+    ) -> std::io::Result<Self> {
+        let num_poly_vars_x = num_cons.log_2();
+        let num_poly_vars_y = (2 * num_vars).log_2();
+        
+        let gens = SparseMatPolyCommitmentGens::new_with_kzg_from_file(
+            label,
+            num_poly_vars_x,
+            num_poly_vars_y,
+            num_nz_entries.next_power_of_two(),
+            3, // 3 matrices: A, B, C
+            srs_path,
+            seed,
+        )?;
+        
+        Ok(R1CSCommitmentGens { gens })
     }
 }
 
@@ -360,9 +415,17 @@ impl R1CSShape {
 
 /// Proof of evaluation of R1CS matrices at random point
 /// Uses full sparse matrix polynomial evaluation proof (same as original Spartan)
+#[cfg(not(feature = "kzg"))]
 #[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct R1CSEvalProof {
     /// Full sparse matrix polynomial evaluation proof
+    proof: SparseMatPolyEvalProof,
+}
+
+#[cfg(feature = "kzg")]
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub struct R1CSEvalProof {
+    /// Full sparse matrix polynomial evaluation proof (KZG mode)
     proof: SparseMatPolyEvalProof,
 }
 

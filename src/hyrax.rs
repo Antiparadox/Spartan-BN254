@@ -178,6 +178,11 @@ impl DensePolynomial {
         self.len == 0
     }
 
+    /// Return the evaluation vector
+    pub fn evals(&self) -> &[Scalar] {
+        &self.Z
+    }
+
     pub fn split(&self, idx: usize) -> (DensePolynomial, DensePolynomial) {
         assert!(idx < self.len());
         (

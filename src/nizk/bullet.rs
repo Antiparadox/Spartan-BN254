@@ -1,18 +1,19 @@
 //! Bullet reduction proof for logarithmic-size inner product arguments
 //! Port of Spartan's bullet.rs to BN254
 
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::errors::ProofVerifyError;
-use crate::group::{CompressedGroup, GroupElement};
+use crate::group::GroupElement;
 use crate::math::Math;
 use crate::scalar::Scalar;
 use crate::transcript::{AppendToTranscript, ProofTranscript};
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BulletReductionProof {
-    L_vec: Vec<CompressedGroup>,
-    R_vec: Vec<CompressedGroup>,
+    L_vec: Vec<GroupElement>,
+    R_vec: Vec<GroupElement>,
 }
 
 impl BulletReductionProof {
@@ -49,8 +50,8 @@ impl BulletReductionProof {
         let mut a: Vec<Scalar> = a_vec.to_vec();
         let mut b: Vec<Scalar> = b_vec.to_vec();
 
-        let mut L_vec: Vec<CompressedGroup> = Vec::with_capacity(lg_n);
-        let mut R_vec: Vec<CompressedGroup> = Vec::with_capacity(lg_n);
+        let mut L_vec: Vec<GroupElement> = Vec::with_capacity(lg_n);
+        let mut R_vec: Vec<GroupElement> = Vec::with_capacity(lg_n);
 
         // Gamma is a commitment to a_vec with a base Q and blinding factor r
         let Gamma = GroupElement::vartime_multiscalar_mul(&a, &G)
@@ -74,8 +75,8 @@ impl BulletReductionProof {
             let L = GroupElement::vartime_multiscalar_mul(a_L, G_R) + c_L * *Q + blind_L * *H;
             let R = GroupElement::vartime_multiscalar_mul(a_R, G_L) + c_R * *Q + blind_R * *H;
 
-            L.compress().append_to_transcript(b"L", transcript);
-            R.compress().append_to_transcript(b"R", transcript);
+            L.append_to_transcript(b"L", transcript);
+            R.append_to_transcript(b"R", transcript);
 
             let u = transcript.challenge_scalar(b"u");
             let u_inv = u.invert().unwrap();
@@ -102,8 +103,8 @@ impl BulletReductionProof {
 
             blind_Gamma = u * u * blind_L + blind_Gamma + u_inv * u_inv * blind_R;
 
-            L_vec.push(L.compress());
-            R_vec.push(R.compress());
+            L_vec.push(L);
+            R_vec.push(R);
         }
 
         assert_eq!(a.len(), 1);
@@ -162,19 +163,8 @@ impl BulletReductionProof {
             let u_sq: Vec<Scalar> = u_vec.iter().map(|u| *u * *u).collect();
             let u_sq_inv: Vec<Scalar> = u_sq.iter().map(|u_sq| u_sq.invert().unwrap()).collect();
 
-            let L_decomp: Vec<GroupElement> = self
-                .L_vec
-                .iter()
-                .map(|L| L.decompress().unwrap())
-                .collect();
-            let R_decomp: Vec<GroupElement> = self
-                .R_vec
-                .iter()
-                .map(|R| R.decompress().unwrap())
-                .collect();
-
-            let Gamma_L = GroupElement::vartime_multiscalar_mul(&u_sq, &L_decomp);
-            let Gamma_R = GroupElement::vartime_multiscalar_mul(&u_sq_inv, &R_decomp);
+            let Gamma_L = GroupElement::vartime_multiscalar_mul(&u_sq, &self.L_vec);
+            let Gamma_R = GroupElement::vartime_multiscalar_mul(&u_sq_inv, &self.R_vec);
 
             Gamma_L + *Gamma + Gamma_R
         };

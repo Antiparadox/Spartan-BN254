@@ -14,7 +14,8 @@
 #![allow(non_snake_case)]
 
 pub mod commitments;
-pub mod dense_mlpoly;
+pub mod hyrax;
+pub mod kzg;
 pub mod errors;
 pub mod group;
 pub mod math;
@@ -35,7 +36,7 @@ pub mod unipoly;
 
 // Re-exports
 pub use commitments::{Commitments, MultiCommitGens};
-pub use dense_mlpoly::{DensePolynomial, EqPolynomial};
+pub use hyrax::{DensePolynomial, EqPolynomial};
 pub use errors::{ProofVerifyError, R1CSError};
 pub use group::{CompressedGroup, GroupElement};
 pub use nizk::{DotProductProofGens, DotProductProofLog, EqualityProof, KnowledgeProof, ProductProof};
@@ -47,6 +48,16 @@ pub use scalar::Scalar;
 pub use snark::{Assignment, InputsAssignment, Instance, NIZK, NIZKGens, SNARK, SNARKGens, VarsAssignment};
 pub use sumcheck::{SumcheckInstanceProof, ZKSumcheckInstanceProof};
 pub use unipoly::{CompressedUniPoly, UniPoly};
+
+// Sparse polynomial exports (for lookup benchmarks)
+pub use sparse_mlpoly_full::{
+    SparseMatEntry, SparseMatPolynomial, SparseMatPolyCommitmentGens,
+    SparseMatPolyCommitment, SparseMatPolyEvalProof, MultiSparseMatPolynomialAsDense,
+    Derefs, DerefsCommitment, PolyEvalNetwork, PolyEvalNetworkProof, ProductLayerProof, HashLayerProof,
+    DerefsEvalProof, AddrTimestamps, ProductLayer,
+};
+pub use product_tree::{ProductCircuit, ProductCircuitEvalProofBatched, DotProductCircuit};
+pub use math::Math;
 
 #[cfg(test)]
 mod tests {

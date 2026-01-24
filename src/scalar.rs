@@ -46,6 +46,11 @@ impl CanonicalDeserialize for Scalar {
 }
 
 impl Scalar {
+    /// Access the inner Fr value
+    pub fn inner(&self) -> Fr {
+        self.0
+    }
+
     /// The zero scalar
     pub fn zero() -> Self {
         Scalar(Fr::zero())

@@ -1,6 +1,6 @@
 //! Sparse multilinear polynomial representation for R1CS matrices
 
-use crate::dense_mlpoly::EqPolynomial;
+use crate::hyrax::EqPolynomial;
 use crate::math::Math;
 use crate::scalar::Scalar;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,18 @@ pub struct SparseMatEntry {
 impl SparseMatEntry {
     pub fn new(row: usize, col: usize, val: Scalar) -> Self {
         SparseMatEntry { row, col, val }
+    }
+    
+    pub fn row(&self) -> usize {
+        self.row
+    }
+    
+    pub fn col(&self) -> usize {
+        self.col
+    }
+    
+    pub fn val(&self) -> Scalar {
+        self.val
     }
 }
 
@@ -42,6 +54,18 @@ impl SparseMatPolynomial {
     
     pub fn entries(&self) -> &[SparseMatEntry] {
         &self.M
+    }
+    
+    pub fn get_entries(&self) -> &[SparseMatEntry] {
+        &self.M
+    }
+    
+    pub fn num_vars_x(&self) -> usize {
+        self.num_vars_x
+    }
+    
+    pub fn num_vars_y(&self) -> usize {
+        self.num_vars_y
     }
 
     pub fn get_num_nz_entries(&self) -> usize {

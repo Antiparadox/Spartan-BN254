@@ -3,10 +3,11 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::commitments::{Commitments, MultiCommitGens};
-use crate::dense_mlpoly::{DensePolynomial, EqPolynomial};
+use crate::hyrax::{DensePolynomial, EqPolynomial};
 use crate::errors::ProofVerifyError;
-use crate::group::{CompressedGroup, GroupElement};
+use crate::group::GroupElement;
 use crate::math::Math;
 use crate::nizk::{DotProductProofGens, DotProductProofLog, EqualityProof, KnowledgeProof, ProductProof};
 use crate::r1cs::R1CSShape;
@@ -19,9 +20,9 @@ use merlin::Transcript;
 use serde::{Deserialize, Serialize};
 
 /// Commitment to a polynomial
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PolyCommitment {
-    pub C: Vec<CompressedGroup>,
+    pub C: Vec<GroupElement>,
 }
 
 impl AppendToTranscript for PolyCommitment {
@@ -54,7 +55,7 @@ impl PolyCommitmentGens {
 }
 
 /// Polynomial evaluation proof
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PolyEvalProof {
     proof: DotProductProofLog,
 }
@@ -75,7 +76,7 @@ impl PolyEvalProof {
         gens: &PolyCommitmentGens,
         transcript: &mut Transcript,
         random_tape: &mut RandomTape,
-    ) -> (PolyEvalProof, CompressedGroup) {
+    ) -> (PolyEvalProof, GroupElement) {
         transcript.append_protocol_name(PolyEvalProof::protocol_name());
 
         assert_eq!(poly.get_num_vars(), r.len());
@@ -126,7 +127,7 @@ impl PolyEvalProof {
         gens: &PolyCommitmentGens,
         transcript: &mut Transcript,
         r: &[Scalar],
-        C_Zr: &CompressedGroup,
+        C_Zr: &GroupElement,
         comm: &PolyCommitment,
     ) -> Result<(), ProofVerifyError> {
         transcript.append_protocol_name(PolyEvalProof::protocol_name());
@@ -136,13 +137,7 @@ impl PolyEvalProof {
         let (L, R) = eq.compute_factored_evals();
 
         // compute a weighted sum of commitments and L
-        let C_decompressed: Vec<GroupElement> = comm
-            .C
-            .iter()
-            .map(|pt| pt.decompress().unwrap())
-            .collect();
-
-        let C_LZ = GroupElement::vartime_multiscalar_mul(&L, &C_decompressed).compress();
+        let C_LZ = GroupElement::vartime_multiscalar_mul(&L, &comm.C);
 
         self.proof
             .verify(R.len(), &gens.gens, transcript, &R, &C_LZ, C_Zr)
@@ -188,20 +183,20 @@ impl R1CSGens {
 }
 
 /// R1CS Proof - proves satisfiability of an R1CS instance
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct R1CSProof {
     comm_vars: PolyCommitment,
     sc_proof_phase1: ZKSumcheckInstanceProof,
     claims_phase2: (
-        CompressedGroup,
-        CompressedGroup,
-        CompressedGroup,
-        CompressedGroup,
+        GroupElement,
+        GroupElement,
+        GroupElement,
+        GroupElement,
     ),
     pok_claims_phase2: (KnowledgeProof, ProductProof),
     proof_eq_sc_phase1: EqualityProof,
     sc_proof_phase2: ZKSumcheckInstanceProof,
-    comm_vars_at_ry: CompressedGroup,
+    comm_vars_at_ry: GroupElement,
     proof_eval_vars_at_ry: PolyEvalProof,
     proof_eq_sc_phase2: EqualityProof,
 }
@@ -231,11 +226,10 @@ impl R1CSProof {
         };
 
         let Z = poly.vec();
-        let C: Vec<CompressedGroup> = (0..L_size)
+        let C: Vec<GroupElement> = (0..L_size)
             .map(|i| {
                 Z[R_size * i..R_size * (i + 1)]
                     .commit(&blinds.blinds[i], &gens.gens.gens_n)
-                    .compress()
             })
             .collect();
 
@@ -491,8 +485,7 @@ impl R1CSProof {
 
         // verify the first sum-check instance
         let claim_phase1 = Scalar::zero()
-            .commit(&Scalar::zero(), &gens.gens_sc.gens_1)
-            .compress();
+            .commit(&Scalar::zero(), &gens.gens_sc.gens_1);
         let sc_result = self.sc_proof_phase1.verify(
             &claim_phase1,
             num_rounds_x,
@@ -531,10 +524,8 @@ impl R1CSProof {
         let taus_bound_rx: Scalar = (0..rx.len())
             .map(|i| rx[i] * tau[i] + (Scalar::one() - rx[i]) * (Scalar::one() - tau[i]))
             .product();
-        let expected_claim_post_phase1 = (taus_bound_rx
-            * (comm_prod_Az_Bz_claims.decompress().unwrap()
-                + (Scalar::zero() - Scalar::one()) * comm_Cz_claim.decompress().unwrap()))
-        .compress();
+        let expected_claim_post_phase1 = taus_bound_rx
+            * (*comm_prod_Az_Bz_claims + (Scalar::zero() - Scalar::one()) * *comm_Cz_claim);
 
         // verify proof that expected_claim_post_phase1 == claim_post_phase1
         self.proof_eq_sc_phase1.verify(
@@ -552,13 +543,8 @@ impl R1CSProof {
         // r_A * comm_Az_claim + r_B * comm_Bz_claim + r_C * comm_Cz_claim
         let comm_claim_phase2 = GroupElement::vartime_multiscalar_mul(
             &[r_A, r_B, r_C],
-            &[
-                comm_Az_claim.decompress().unwrap(),
-                comm_Bz_claim.decompress().unwrap(),
-                comm_Cz_claim.decompress().unwrap(),
-            ],
-        )
-        .compress();
+            &[*comm_Az_claim, *comm_Bz_claim, *comm_Cz_claim],
+        );
 
         // verify the joint claim with a sum-check protocol
         let sc2_result = self.sc_proof_phase2.verify(
@@ -593,7 +579,7 @@ impl R1CSProof {
         // Build the sparse input polynomial evaluation
         let poly_input_eval = {
             use crate::sparse_mlpoly::{SparseMatEntry, SparseMatPolynomial};
-            use crate::dense_mlpoly::EqPolynomial;
+            use crate::hyrax::EqPolynomial;
             
             // constant term
             let mut entries = vec![SparseMatEntry::new(0, 0, Scalar::one())];
@@ -611,7 +597,7 @@ impl R1CSProof {
         let comm_eval_Z_at_ry = GroupElement::vartime_multiscalar_mul(
             &[Scalar::one() - ry[0], ry[0]],
             &[
-                self.comm_vars_at_ry.decompress().unwrap(),
+                self.comm_vars_at_ry,
                 poly_input_eval.commit(&Scalar::zero(), &gens.gens_pc.gens.gens_1),
             ],
         );
@@ -619,7 +605,7 @@ impl R1CSProof {
         // perform the final check in the second sum-check protocol
         let (eval_A_r, eval_B_r, eval_C_r) = evals;
         let expected_claim_post_phase2 =
-            ((r_A * *eval_A_r + r_B * *eval_B_r + r_C * *eval_C_r) * comm_eval_Z_at_ry).compress();
+            (r_A * *eval_A_r + r_B * *eval_B_r + r_C * *eval_C_r) * comm_eval_Z_at_ry;
             
         // verify proof that expected_claim_post_phase1 == claim_post_phase1
         self.proof_eq_sc_phase2.verify(

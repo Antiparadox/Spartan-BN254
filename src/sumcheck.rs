@@ -8,7 +8,7 @@
 
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use crate::commitments::{Commitments, MultiCommitGens};
-use crate::dense_mlpoly::DensePolynomial;
+use crate::hyrax::DensePolynomial;
 use crate::errors::ProofVerifyError;
 use crate::group::GroupElement;
 use crate::nizk::DotProductProof;

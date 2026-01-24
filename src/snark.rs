@@ -292,8 +292,9 @@ pub struct SNARKGens {
     pub gens_r1cs_eval: R1CSCommitmentGens,
 }
 
+#[cfg(not(feature = "kzg"))]
 impl SNARKGens {
-    /// Create generators for the given R1CS dimensions
+    /// Create generators for the given R1CS dimensions (Hyrax mode)
     /// 
     /// # Arguments
     /// * `num_cons` - Number of constraints (will be padded to power of 2)
@@ -327,6 +328,68 @@ impl SNARKGens {
     }
 }
 
+#[cfg(feature = "kzg")]
+impl SNARKGens {
+    /// Create generators for the given R1CS dimensions (KZG mode)
+    /// 
+    /// # Arguments
+    /// * `num_cons` - Number of constraints (will be padded to power of 2)
+    /// * `num_vars` - Number of variables (will be padded to power of 2)
+    /// * `num_inputs` - Number of public inputs
+    /// * `num_nz_entries` - Maximum number of non-zero entries across A, B, C matrices
+    /// * `kzg_srs` - KZG structured reference string
+    pub fn new_with_kzg(num_cons: usize, num_vars: usize, num_inputs: usize, num_nz_entries: usize, kzg_srs: crate::kzg::KZGSrs) -> Self {
+        let num_vars_padded = {
+            let mut n = max(num_vars, num_inputs + 1);
+            if n.next_power_of_two() != n {
+                n = n.next_power_of_two();
+            }
+            n
+        };
+        let num_cons_padded = {
+            let mut n = max(num_cons, 2);
+            if n.next_power_of_two() != n {
+                n = n.next_power_of_two();
+            }
+            n
+        };
+
+        let gens_r1cs_sat = R1CSGens::new(b"gens_r1cs_sat", num_cons_padded, num_vars_padded);
+        let gens_r1cs_eval = R1CSCommitmentGens::new_with_kzg(b"gens_r1cs_eval", num_cons_padded, num_vars_padded, num_nz_entries, kzg_srs);
+
+        SNARKGens {
+            gens_r1cs_sat,
+            gens_r1cs_eval,
+        }
+    }
+    
+    /// Create generators from file or generate KZG SRS
+    pub fn new_with_kzg_from_file(num_cons: usize, num_vars: usize, num_inputs: usize, num_nz_entries: usize, srs_path: &str, seed: u64) -> std::io::Result<Self> {
+        let num_vars_padded = {
+            let mut n = max(num_vars, num_inputs + 1);
+            if n.next_power_of_two() != n {
+                n = n.next_power_of_two();
+            }
+            n
+        };
+        let num_cons_padded = {
+            let mut n = max(num_cons, 2);
+            if n.next_power_of_two() != n {
+                n = n.next_power_of_two();
+            }
+            n
+        };
+
+        let gens_r1cs_sat = R1CSGens::new(b"gens_r1cs_sat", num_cons_padded, num_vars_padded);
+        let gens_r1cs_eval = R1CSCommitmentGens::new_with_kzg_from_file(b"gens_r1cs_eval", num_cons_padded, num_vars_padded, num_nz_entries, srs_path, seed)?;
+
+        Ok(SNARKGens {
+            gens_r1cs_sat,
+            gens_r1cs_eval,
+        })
+    }
+}
+
 /// SNARK proof - succinct verification, verifier doesn't need full R1CS
 /// 
 /// Note: The random points (rx, ry) are NOT stored in the proof because
@@ -338,7 +401,7 @@ impl SNARKGens {
 /// 
 /// Uses CanonicalSerialize for cross-verification compatibility with arkworks-spartan.
 #[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(all(feature = "serde", not(feature = "kzg")), derive(Serialize, Deserialize))]
 pub struct SNARK {
     r1cs_sat_proof: R1CSProof,
     inst_evals: (Scalar, Scalar, Scalar),
@@ -532,8 +595,9 @@ mod tests {
         // Check satisfaction
         assert!(inst.is_sat(&vars_assignment, &inputs).unwrap());
 
-        // Create generators
-        let gens = SNARKGens::new(num_cons, num_vars, num_inputs);
+        // Create generators (max_nnz = 1 for this simple test)
+        let max_nnz = 4; // padded
+        let gens = SNARKGens::new(num_cons, num_vars, num_inputs, max_nnz);
 
         // Encode (preprocess)
         let (comm, decomm) = SNARK::encode(&inst, &gens);
